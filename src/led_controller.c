@@ -58,6 +58,20 @@ typedef struct {
             BOOL_T is_light_on;  // 当前LED亮灭状态
             uint16_t blink_count; // 已闪烁次数
         } blink;
+        struct {
+            uint8_t current_led; // 当前亮的LED位置（0-11）
+            uint8_t target_level; // 目标等级
+            uint8_t current_level; // 当前点亮等级
+            BOOL_T showing_final; // 是否在显示最终状态
+        } config_success;
+        struct {
+            uint8_t flash_count; // 闪烁次数（0-2）
+            BOOL_T is_light_on;  // 当前LED亮灭状态
+            BOOL_T in_constant_mode; // 是否在常亮模式
+        } wake;
+        struct {
+            uint8_t current_position; // 当前LED位置（0-11）
+        } standby;
     } state_data;
     
     // 定时器
@@ -114,6 +128,28 @@ static void set_level_leds(const RGBColor *color, uint8_t level) {
     ws2812_spi_refresh();
 }
 
+// 设置单个LED（用于待机跑马灯效果）
+static void set_single_led(const RGBColor *color, uint8_t position) {
+    // 确保位置在有效范围内（0-11）
+    if (position >= WS2812_LED_COUNT) {
+        position = 0;
+    }
+    
+    // 首先关闭所有LED
+    for (int i = 0; i < WS2812_LED_COUNT; i++) {
+        ws2812_spi_set_pixel(i, COLOR_BLACK.r, COLOR_BLACK.g, COLOR_BLACK.b);
+    }
+    
+    // 点亮指定位置的LED
+    uint8_t led_num = LED_LIGHT_ORDER[position + 1];  // position 0-11 对应 LED_LIGHT_ORDER[1-12]
+    if (led_num > 0 && led_num <= WS2812_LED_COUNT) {
+        uint8_t led_index = led_num - 1;  // 转换为0-based索引
+        ws2812_spi_set_pixel(led_index, color->r, color->g, color->b);
+    }
+    
+    ws2812_spi_refresh();
+}
+
 // 主定时器回调：处理所有状态事件
 static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
     switch (led_ctrl.current_state) {
@@ -155,66 +191,88 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
             }
             break;
             
-        case LED_CONFIG_SUCCESS:
-        case LED_VOLUME:
-            // 显示状态超时，进入空闲
-            led_ctrl.current_state = LED_IDLE;
-            set_all_leds(&COLOR_BLACK);
-            TAL_PR_DEBUG("Display timeout, entering idle state");
-            break;
-            
-        case LED_DIALOG:
-            // 对话状态：切换亮灭状态
+        case LED_CONFIGURING:
+            // 配网中：绿灯闪烁（250ms亮、250ms灭）
             if (led_ctrl.state_data.blink.is_light_on) {
                 // 当前亮 -> 切换为灭
                 set_all_leds(&COLOR_BLACK);
                 led_ctrl.state_data.blink.is_light_on = FALSE;
-                tal_sw_timer_start(led_ctrl.main_timer, DIALOG_LIGHT_OFF_TIME, TAL_TIMER_ONCE);
             } else {
                 // 当前灭 -> 切换为亮
-                set_all_leds(&COLOR_BLUE);
+                set_all_leds(&COLOR_GREEN);
                 led_ctrl.state_data.blink.is_light_on = TRUE;
-                led_ctrl.state_data.blink.blink_count++;
-                
-                // 检查是否达到总闪烁次数
-                if (led_ctrl.state_data.blink.blink_count >= DIALOG_BLINK_COUNT) {
-                    led_ctrl.current_state = LED_IDLE;
-                    set_all_leds(&COLOR_BLACK);
-                    TAL_PR_DEBUG("Dialog blinking complete, entering idle state");
+            }
+            tal_sw_timer_start(led_ctrl.main_timer, CONFIGURING_BLINK_TIME, TAL_TIMER_ONCE);
+            break;
+            
+        case LED_CONFIG_SUCCESS:
+            // 配网成功：每200ms亮一个灯，亮完保持2s后熄灭
+            if (!led_ctrl.state_data.config_success.showing_final) {
+                if (led_ctrl.state_data.config_success.current_level < led_ctrl.state_data.config_success.target_level) {
+                    // 继续点亮下一个LED
+                    led_ctrl.state_data.config_success.current_level++;
+                    set_level_leds(&COLOR_GREEN, led_ctrl.state_data.config_success.current_level);
+                    tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_LED_INTERVAL, TAL_TIMER_ONCE);
                 } else {
-                    tal_sw_timer_start(led_ctrl.main_timer, DIALOG_LIGHT_ON_TIME, TAL_TIMER_ONCE);
+                    // 所有LED已点亮，开始保持状态
+                    led_ctrl.state_data.config_success.showing_final = TRUE;
+                    tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_TIMEOUT, TAL_TIMER_ONCE);
                 }
-            }
-            break;
-            
-        case LED_CONFIGURING: // 配网中（绿灯呼吸效果）
-        case LED_BREATHING:   // 呼吸灯效果（蓝灯呼吸）
-        {
-            // 更新呼吸灯索引
-            led_ctrl.state_data.breath.index++;
-            
-            // 处理索引循环
-            if (led_ctrl.state_data.breath.index >= BREATH_TABLE_SIZE) {
-                led_ctrl.state_data.breath.index = 0;
-            }
-            
-            // 获取当前亮度值
-            uint8_t brightness = BREATH_BRIGHTNESS_TABLE[led_ctrl.state_data.breath.index];
-            
-            // 设置LED颜色
-            if (led_ctrl.current_state == LED_CONFIGURING) {
-                // 配网中：绿灯呼吸
-                ws2812_spi_set_all(0, brightness, 0);
             } else {
-                // 呼吸灯：蓝灯呼吸
-                ws2812_spi_set_all(0, 0, brightness);
+                // 保持时间结束，进入空闲状态
+                led_ctrl.current_state = LED_IDLE;
+                set_all_leds(&COLOR_BLACK);
+                TAL_PR_DEBUG("Config success display complete, entering idle state");
             }
-            ws2812_spi_refresh();
-            
-            // 设置下一次呼吸定时
-            tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
             break;
-        }
+            
+        case LED_VOLUME:
+            // 音量显示超时，进入空闲
+            led_ctrl.current_state = LED_IDLE;
+            set_all_leds(&COLOR_BLACK);
+            TAL_PR_DEBUG("Volume display timeout, entering idle state");
+            break;
+            
+        case LED_WAKE:
+            // 唤醒状态：蓝灯闪两下后常亮，12秒后自动关闭
+            if (!led_ctrl.state_data.wake.in_constant_mode) {
+                // 闪烁阶段
+                if (led_ctrl.state_data.wake.is_light_on) {
+                    // 当前亮 -> 切换为灭
+                    set_all_leds(&COLOR_BLACK);
+                    led_ctrl.state_data.wake.is_light_on = FALSE;
+                    tal_sw_timer_start(led_ctrl.main_timer, WAKE_FLASH_OFF_TIME, TAL_TIMER_ONCE);
+                } else {
+                    // 当前灭 -> 切换为亮
+                    set_all_leds(&COLOR_BLUE);
+                    led_ctrl.state_data.wake.is_light_on = TRUE;
+                    led_ctrl.state_data.wake.flash_count++;
+                    
+                    if (led_ctrl.state_data.wake.flash_count >= 2) {
+                        // 闪烁完成，进入常亮模式
+                        led_ctrl.state_data.wake.in_constant_mode = TRUE;
+                        tal_sw_timer_start(led_ctrl.main_timer, WAKE_TOTAL_TIME, TAL_TIMER_ONCE);
+                    } else {
+                        tal_sw_timer_start(led_ctrl.main_timer, WAKE_FLASH_ON_TIME, TAL_TIMER_ONCE);
+                    }
+                }
+            } else {
+                // 常亮模式超时，进入空闲状态
+                led_ctrl.current_state = LED_IDLE;
+                set_all_leds(&COLOR_BLACK);
+                TAL_PR_DEBUG("Wake timeout, entering idle state");
+            }
+            break;
+            
+        case LED_STANDBY:
+            // 待机状态：单个绿灯360度循环跑马
+            led_ctrl.state_data.standby.current_position++;
+            if (led_ctrl.state_data.standby.current_position >= 12) {
+                led_ctrl.state_data.standby.current_position = 0;
+            }
+            set_single_led(&COLOR_GREEN, led_ctrl.state_data.standby.current_position);
+            tal_sw_timer_start(led_ctrl.main_timer, STANDBY_MOVE_INTERVAL, TAL_TIMER_ONCE);
+            break;
             
         default:
             // 其他状态无需处理
@@ -270,9 +328,21 @@ void set_led_state(LedState new_state, uint8_t value) {
         if (new_state == LED_CONFIG_SUCCESS || new_state == LED_VOLUME) {
             // 对于等级显示状态，如果等级相同则重新启动定时器
             if (new_state == LED_CONFIG_SUCCESS) {
-                set_level_leds(&COLOR_GREEN, value);
-                tal_sw_timer_stop(led_ctrl.main_timer);
-                tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_TIMEOUT, TAL_TIMER_ONCE);
+                // 重新开始配网成功序列
+                led_ctrl.state_data.config_success.target_level = value;
+                led_ctrl.state_data.config_success.current_level = 0;
+                led_ctrl.state_data.config_success.showing_final = FALSE;
+                if (value > 0) {
+                    led_ctrl.state_data.config_success.current_level = 1;
+                    set_level_leds(&COLOR_GREEN, 1);
+                    tal_sw_timer_stop(led_ctrl.main_timer);
+                    tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_LED_INTERVAL, TAL_TIMER_ONCE);
+                } else {
+                    led_ctrl.state_data.config_success.showing_final = TRUE;
+                    set_all_leds(&COLOR_BLACK);
+                    tal_sw_timer_stop(led_ctrl.main_timer);
+                    tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_TIMEOUT, TAL_TIMER_ONCE);
+                }
             } else if (new_state == LED_VOLUME) {
                 set_level_leds(&COLOR_YELLOW, value);
                 tal_sw_timer_stop(led_ctrl.main_timer);
@@ -286,6 +356,12 @@ void set_led_state(LedState new_state, uint8_t value) {
         } else if (new_state == LED_NET_ERROR) {
             // 网络错误状态重复设置时不需要额外操作
             return;
+        } else if (new_state == LED_WAKE) {
+            // 唤醒状态重复设置时重新开始唤醒序列
+            // 不return，让后面的代码重新初始化
+        } else if (new_state == LED_CONFIGURING || new_state == LED_STANDBY) {
+            // 配网中和待机状态重复设置时重新开始
+            // 不return，让后面的代码重新初始化
         }
         // 其他状态如呼吸灯等需要重新初始化
     }
@@ -305,25 +381,44 @@ void set_led_state(LedState new_state, uint8_t value) {
             set_all_leds(&COLOR_BLACK);
             break;
             
-        case LED_CONFIGURING: // 配网中（绿灯呼吸效果）
-            led_ctrl.state_data.breath.index = 0;
-            tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
+        case LED_CONFIGURING: // 配网中（绿灯闪烁250ms亮、250ms灭）
+            led_ctrl.state_data.blink.is_light_on = FALSE;
+            led_ctrl.state_data.blink.blink_count = 0;
+            set_all_leds(&COLOR_GREEN);  // 开始时点亮绿灯
+            led_ctrl.state_data.blink.is_light_on = TRUE;
+            tal_sw_timer_start(led_ctrl.main_timer, CONFIGURING_BLINK_TIME, TAL_TIMER_ONCE);
             break;
             
-        case LED_CONFIG_SUCCESS: // 配网成功（显示WIFI信号强度）
-            set_level_leds(&COLOR_GREEN, value);
-            tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_TIMEOUT, TAL_TIMER_ONCE);
+        case LED_CONFIG_SUCCESS: // 配网成功（显示WIFI信号强度，每200ms亮一个灯）
+            led_ctrl.state_data.config_success.target_level = value;
+            led_ctrl.state_data.config_success.current_level = 0;
+            led_ctrl.state_data.config_success.showing_final = FALSE;
+            // 开始序列点亮
+            if (value > 0) {
+                led_ctrl.state_data.config_success.current_level = 1;
+                set_level_leds(&COLOR_GREEN, 1);
+                tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_LED_INTERVAL, TAL_TIMER_ONCE);
+            } else {
+                // 如果等级为0，直接进入保持状态
+                led_ctrl.state_data.config_success.showing_final = TRUE;
+                set_all_leds(&COLOR_BLACK);
+                tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_TIMEOUT, TAL_TIMER_ONCE);
+            }
             break;
             
         case LED_NET_ERROR: // 网络异常（红灯常亮）
             set_all_leds(&COLOR_RED);
             break;
             
-        case LED_DIALOG: // 对话中（蓝灯闪烁）
+        case LED_WAKE: // 唤醒（蓝灯闪两下后常亮，12秒内无对话或对话无效关闭）
+            led_ctrl.state_data.wake.flash_count = 0;
+            led_ctrl.state_data.wake.is_light_on = FALSE;
+            led_ctrl.state_data.wake.in_constant_mode = FALSE;
+            // 开始第一次闪烁
             set_all_leds(&COLOR_BLUE);
-            led_ctrl.state_data.blink.is_light_on = TRUE;
-            led_ctrl.state_data.blink.blink_count = 0;
-            tal_sw_timer_start(led_ctrl.main_timer, DIALOG_LIGHT_ON_TIME, TAL_TIMER_ONCE);
+            led_ctrl.state_data.wake.is_light_on = TRUE;
+            led_ctrl.state_data.wake.flash_count = 1;
+            tal_sw_timer_start(led_ctrl.main_timer, WAKE_FLASH_ON_TIME, TAL_TIMER_ONCE);
             break;
             
         case LED_VOLUME: // 音量调节（黄灯等级显示）
@@ -331,9 +426,10 @@ void set_led_state(LedState new_state, uint8_t value) {
             tal_sw_timer_start(led_ctrl.main_timer, VOLUME_DISPLAY_TIMEOUT, TAL_TIMER_ONCE);
             break;
             
-        case LED_BREATHING: // 呼吸灯效果（蓝灯呼吸）
-            led_ctrl.state_data.breath.index = 0;
-            tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
+        case LED_STANDBY: // 待机（单个绿灯360度循环跑马，每250ms移动至下一个）
+            led_ctrl.state_data.standby.current_position = 0;
+            set_single_led(&COLOR_GREEN, 0);
+            tal_sw_timer_start(led_ctrl.main_timer, STANDBY_MOVE_INTERVAL, TAL_TIMER_ONCE);
             break;
     }
     
