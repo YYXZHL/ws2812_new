@@ -15,12 +15,14 @@
 // 状态超时参数
 #define CONFIG_SUCCESS_TIMEOUT  2000  // 配网成功显示时间 (ms)
 #define VOLUME_DISPLAY_TIMEOUT  2000  // 音量显示时间 (ms)
-#define DIALOG_TOTAL_TIME       5000  // 对话状态总时间 (ms)
+#define WAKE_TOTAL_TIME       12000   // 唤醒状态总时间 (ms)
 
 // 闪烁时间参数
-#define DIALOG_LIGHT_ON_TIME    100   // 对话状态亮灯时间 (ms)
-#define DIALOG_LIGHT_OFF_TIME   150   // 对话状态灭灯时间 (ms)
-#define DIALOG_BLINK_COUNT      (DIALOG_TOTAL_TIME / (DIALOG_LIGHT_ON_TIME + DIALOG_LIGHT_OFF_TIME)) // 闪烁次数
+#define CONFIGURING_BLINK_TIME  250   // 配网中闪烁间隔 (ms)
+#define CONFIG_SUCCESS_LED_INTERVAL 200 // 配网成功LED点亮间隔 (ms)
+#define WAKE_FLASH_ON_TIME    200     // 唤醒闪烁亮灯时间 (ms)
+#define WAKE_FLASH_OFF_TIME   200     // 唤醒闪烁灭灯时间 (ms)
+#define STANDBY_MOVE_INTERVAL 250     // 待机跑马灯移动间隔 (ms)
 
 // 呼吸灯参数
 #define BREATH_TIMER_INTERVAL   15    // 呼吸灯定时器周期 (ms)
@@ -30,12 +32,12 @@
 typedef enum {
     LED_IDLE,         ///< 空闲状态（所有LED熄灭）
     LED_INIT,         ///< 上电自检状态（红->绿->蓝）
-    LED_CONFIGURING,  ///< 配网中（绿灯呼吸效果）
-    LED_CONFIG_SUCCESS,///< 配网成功（显示WIFI信号强度）
+    LED_CONFIGURING,  ///< 配网中（绿灯闪烁250ms亮、250ms灭）
+    LED_CONFIG_SUCCESS,///< 配网成功（显示WIFI信号强度，每200ms亮一个灯，灯亮完保持2s后灭。如：等级5，每200ms亮一个灯，亮至第5个时，灯保持两秒熄灭）
     LED_NET_ERROR,    ///< 网络异常（红灯常亮）
-    LED_DIALOG,       ///< 对话中（蓝灯闪烁）
+    LED_WAKE,         ///< 唤醒（蓝灯闪两下后常亮，12秒内无对话或对话无效关闭。闪两下200ms，后常亮）
     LED_VOLUME,       ///< 调节音量（黄灯等级显示）
-    LED_BREATHING     ///< 呼吸灯效果（蓝灯呼吸）
+    LED_STANDBY       ///< 待机（单个绿灯360度循环跑马，每250ms移动至下一个）
 } LedState;
 
 /**
